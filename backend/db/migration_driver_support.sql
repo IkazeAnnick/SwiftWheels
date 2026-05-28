@@ -1,0 +1,6 @@
+ALTER TABLE schedules
+ADD COLUMN driver_id INT NULL AFTER r_id,
+ADD CONSTRAINT schedules_driver_fk
+FOREIGN KEY (driver_id) REFERENCES users(user_id)
+ON DELETE SET NULL
+ON UPDATE CASCADE;

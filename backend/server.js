@@ -48,6 +48,75 @@ function isPositiveInteger(value) {
     return Number.isInteger(Number(value)) && Number(value) > 0;
 }
 
+function toMysqlDateTime(value) {
+    const normalized = String(value).replace('T', ' ').slice(0, 19);
+    return normalized.length === 16 ? `${normalized}:00` : normalized;
+}
+
+function currentMysqlDateTime() {
+    const now = new Date();
+    const offsetDate = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+    return offsetDate.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function isMysqlDateTime(value) {
+    return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value);
+}
+
+function parseMysqlDateTime(value) {
+    if (!isMysqlDateTime(value)) {
+        return null;
+    }
+
+    const [datePart, timePart] = value.split(' ');
+    const [year, month, day] = datePart.split('-').map(Number);
+    const [hour, minute, second] = timePart.split(':').map(Number);
+    const date = new Date(year, month - 1, day, hour, minute, second);
+
+    if (
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day ||
+        date.getHours() !== hour ||
+        date.getMinutes() !== minute ||
+        date.getSeconds() !== second
+    ) {
+        return null;
+    }
+
+    return date;
+}
+
+function validateScheduleTimes(departureTime, arrivalTime) {
+    const normalizedDepartureTime = toMysqlDateTime(departureTime);
+    const normalizedArrivalTime = toMysqlDateTime(arrivalTime);
+    const departureDate = parseMysqlDateTime(normalizedDepartureTime);
+    const arrivalDate = parseMysqlDateTime(normalizedArrivalTime);
+
+    if (!departureDate || !arrivalDate) {
+        return {
+            error: 'Departure time and arrival time must be valid date-time values'
+        };
+    }
+
+    if (departureDate <= new Date()) {
+        return {
+            error: 'Departure time must be in the future. Please update the departure time, not only the arrival time.'
+        };
+    }
+
+    if (arrivalDate <= departureDate) {
+        return {
+            error: 'Arrival time must be after departure time'
+        };
+    }
+
+    return {
+        normalizedDepartureTime,
+        normalizedArrivalTime
+    };
+}
+
 function buildReportFilters(query, scheduleAlias = 'schedules') {
     const where = [];
     const params = [];
@@ -148,6 +217,7 @@ async function getScheduleDetails(scheduleId, connection = db) {
                 schedules.r_id,
                 schedules.driver_id,
                 schedules.departure_time,
+                schedules.arrival_time,
                 buses.plate_Number,
                 buses.total_seat,
                 routes.source,
@@ -181,6 +251,26 @@ async function driverExists(driverId, connection = db) {
     );
 
     return drivers.length > 0;
+}
+
+async function cleanUnavailableSchedules() {
+    await db.query(`
+        DELETE FROM schedules
+        WHERE departure_time <= ?
+    `, [currentMysqlDateTime()]);
+
+    const [fullSchedules] = await db.query(`
+        SELECT schedules.sch_id
+        FROM schedules
+        JOIN buses ON schedules.bus_id = buses.bus_id
+        LEFT JOIN ticket ON schedules.sch_id = ticket.sch_id
+        GROUP BY schedules.sch_id, buses.total_seat
+        HAVING COUNT(ticket.ticket_id) >= buses.total_seat
+    `);
+
+    for (const schedule of fullSchedules) {
+        await db.query('DELETE FROM schedules WHERE sch_id = ?', [schedule.sch_id]);
+    }
 }
 
 // Auth
@@ -484,19 +574,49 @@ app.delete('/api/routes/:id', requireManager, asyncHandler(async (req, res) => {
 
 // Schedules map buses to routes at a departure date and time.
 app.post('/api/schedules', requireManager, asyncHandler(async (req, res) => {
-    const { bus_id, r_id, driver_id = null, departure_time } = req.body;
+    const {
+        bus_id,
+        r_id,
+        driver_id = null,
+        departure_time,
+        arrival_time
+    } = req.body;
 
-    if (!isPositiveInteger(bus_id) || !isPositiveInteger(r_id) || !departure_time) {
-        return res.status(400).json({ message: 'Bus, route, and departure time are required' });
+    if (
+        !isPositiveInteger(bus_id) ||
+        !isPositiveInteger(r_id) ||
+        !departure_time ||
+        !arrival_time
+    ) {
+        return res.status(400).json({
+            message: 'Bus, route, departure time and arrival time are required'
+        });
+    }
+
+    const timeValidation = validateScheduleTimes(departure_time, arrival_time);
+    if (timeValidation.error) {
+        return res.status(400).json({
+            message: timeValidation.error
+        });
     }
 
     if (driver_id && !(await driverExists(driver_id))) {
-        return res.status(400).json({ message: 'Selected driver does not exist' });
+        return res.status(400).json({
+            message: 'Selected driver does not exist'
+        });
     }
 
     const [result] = await db.query(
-        'INSERT INTO schedules (bus_id, r_id, driver_id, departure_time) VALUES (?, ?, ?, ?)',
-        [bus_id, r_id, driver_id || null, departure_time]
+        `INSERT INTO schedules
+        (bus_id, r_id, driver_id, departure_time, arrival_time)
+        VALUES (?, ?, ?, ?, ?)`,
+        [
+            bus_id,
+            r_id,
+            driver_id || null,
+            timeValidation.normalizedDepartureTime,
+            timeValidation.normalizedArrivalTime
+        ]
     );
 
     return res.status(201).json({
@@ -504,8 +624,9 @@ app.post('/api/schedules', requireManager, asyncHandler(async (req, res) => {
         sch_id: result.insertId
     });
 }));
-
 app.get('/api/schedules', requireManager, asyncHandler(async (req, res) => {
+    await cleanUnavailableSchedules();
+
     const { source, destination, departure_date } = req.query;
     const where = [];
     const params = [];
@@ -527,27 +648,44 @@ app.get('/api/schedules', requireManager, asyncHandler(async (req, res) => {
 
     const [schedules] = await db.query(
         `
-            SELECT
-                schedules.sch_id,
-                schedules.bus_id,
-                schedules.r_id,
-                schedules.driver_id,
-                schedules.departure_time,
-                buses.plate_Number,
-                buses.total_seat,
-                routes.source,
-                routes.destination,
-                routes.price,
-                users.full_name AS driver_name,
-                (buses.total_seat - COUNT(ticket.ticket_id)) AS available_seats
-            FROM schedules
-            JOIN buses ON schedules.bus_id = buses.bus_id
-            JOIN routes ON schedules.r_id = routes.r_id
-            LEFT JOIN users ON schedules.driver_id = users.user_id
-            LEFT JOIN ticket ON schedules.sch_id = ticket.sch_id
-            ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-            GROUP BY schedules.sch_id
-            ORDER BY schedules.departure_time ASC
+        SELECT
+            schedules.sch_id,
+            schedules.bus_id,
+            schedules.r_id,
+            schedules.driver_id,
+            schedules.departure_time,
+            schedules.arrival_time,
+
+            buses.plate_Number,
+            buses.total_seat,
+
+            routes.source,
+            routes.destination,
+            routes.price,
+
+            users.full_name AS driver_name,
+
+            (buses.total_seat - COUNT(ticket.ticket_id)) AS available_seats
+
+        FROM schedules
+
+        JOIN buses
+            ON schedules.bus_id = buses.bus_id
+
+        JOIN routes
+            ON schedules.r_id = routes.r_id
+
+        LEFT JOIN users
+            ON schedules.driver_id = users.user_id
+
+        LEFT JOIN ticket
+            ON schedules.sch_id = ticket.sch_id
+
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+
+        GROUP BY schedules.sch_id
+
+        ORDER BY schedules.departure_time ASC
         `,
         params
     );
@@ -555,7 +693,41 @@ app.get('/api/schedules', requireManager, asyncHandler(async (req, res) => {
     return res.status(200).json(schedules);
 }));
 
+app.get('/api/customer/schedule-options', requireCustomer, asyncHandler(async (req, res) => {
+    await cleanUnavailableSchedules();
+
+    const [schedules] = await db.query(
+        `
+        SELECT
+            schedules.sch_id,
+            schedules.departure_time,
+            schedules.arrival_time,
+            buses.bus_id,
+            buses.plate_Number,
+            buses.total_seat,
+            routes.r_id,
+            routes.source,
+            routes.destination,
+            routes.price,
+            users.full_name AS driver_name,
+            (buses.total_seat - COUNT(ticket.ticket_id)) AS available_seats
+        FROM schedules
+        JOIN buses ON schedules.bus_id = buses.bus_id
+        JOIN routes ON schedules.r_id = routes.r_id
+        LEFT JOIN users ON schedules.driver_id = users.user_id
+        LEFT JOIN ticket ON schedules.sch_id = ticket.sch_id
+        GROUP BY schedules.sch_id
+        HAVING available_seats > 0
+        ORDER BY routes.source, routes.destination, schedules.departure_time ASC
+        `
+    );
+
+    return res.status(200).json(schedules);
+}));
+
 app.get('/api/search', requireCustomer, asyncHandler(async (req, res) => {
+    await cleanUnavailableSchedules();
+
     const { source, destination, departure_date } = req.query;
 
     if (!source || !destination || !departure_date) {
@@ -565,59 +737,117 @@ app.get('/api/search', requireCustomer, asyncHandler(async (req, res) => {
     }
 
     const [schedules] = await db.query(
-        `
-            SELECT
-                schedules.sch_id,
-                schedules.departure_time,
-                schedules.driver_id,
-                buses.bus_id,
-                buses.plate_Number,
-                buses.total_seat,
-                routes.r_id,
-                routes.source,
-                routes.destination,
-                routes.price,
-                users.full_name AS driver_name,
-                (buses.total_seat - COUNT(ticket.ticket_id)) AS available_seats
-            FROM schedules
-            JOIN buses ON schedules.bus_id = buses.bus_id
-            JOIN routes ON schedules.r_id = routes.r_id
-            LEFT JOIN users ON schedules.driver_id = users.user_id
-            LEFT JOIN ticket ON schedules.sch_id = ticket.sch_id
-            WHERE LOWER(routes.source) = LOWER(?)
-                AND LOWER(routes.destination) = LOWER(?)
-                AND DATE(schedules.departure_time) = ?
-            GROUP BY schedules.sch_id
-            HAVING available_seats > 0
-            ORDER BY schedules.departure_time ASC
-        `,
-        [source, destination, departure_date]
-    );
+    `
+    SELECT
+        schedules.sch_id,
+        schedules.departure_time,
+        schedules.arrival_time,
+        schedules.driver_id,
+
+        buses.bus_id,
+        buses.plate_Number,
+        buses.total_seat,
+
+        routes.r_id,
+        routes.source,
+        routes.destination,
+        routes.price,
+
+        users.full_name AS driver_name,
+
+        (buses.total_seat - COUNT(ticket.ticket_id)) AS available_seats
+
+    FROM schedules
+
+    JOIN buses
+        ON schedules.bus_id = buses.bus_id
+
+    JOIN routes
+        ON schedules.r_id = routes.r_id
+
+    LEFT JOIN users
+        ON schedules.driver_id = users.user_id
+
+    LEFT JOIN ticket
+        ON schedules.sch_id = ticket.sch_id
+
+    WHERE LOWER(routes.source) = LOWER(?)
+        AND LOWER(routes.destination) = LOWER(?)
+        AND DATE(schedules.departure_time) = ?
+
+    GROUP BY schedules.sch_id
+
+    HAVING available_seats > 0
+
+    ORDER BY schedules.departure_time ASC
+    `,
+    [source, destination, departure_date]
+);
 
     return res.status(200).json(schedules);
 }));
 
 app.put('/api/schedules/:id', requireManager, asyncHandler(async (req, res) => {
-    const { bus_id, r_id, driver_id = null, departure_time } = req.body;
+    const {
+        bus_id,
+        r_id,
+        driver_id = null,
+        departure_time,
+        arrival_time
+    } = req.body;
 
-    if (!isPositiveInteger(bus_id) || !isPositiveInteger(r_id) || !departure_time) {
-        return res.status(400).json({ message: 'Bus, route, and departure time are required' });
+    if (
+        !isPositiveInteger(bus_id) ||
+        !isPositiveInteger(r_id) ||
+        !departure_time ||
+        !arrival_time
+    ) {
+        return res.status(400).json({
+            message: 'Bus, route, departure time and arrival time are required'
+        });
+    }
+
+    const timeValidation = validateScheduleTimes(departure_time, arrival_time);
+    if (timeValidation.error) {
+        return res.status(400).json({
+            message: timeValidation.error
+        });
     }
 
     if (driver_id && !(await driverExists(driver_id))) {
-        return res.status(400).json({ message: 'Selected driver does not exist' });
+        return res.status(400).json({
+            message: 'Selected driver does not exist'
+        });
     }
 
     const [result] = await db.query(
-        'UPDATE schedules SET bus_id = ?, r_id = ?, driver_id = ?, departure_time = ? WHERE sch_id = ?',
-        [bus_id, r_id, driver_id || null, departure_time, req.params.id]
+        `UPDATE schedules
+        SET
+            bus_id = ?,
+            r_id = ?,
+            driver_id = ?,
+            departure_time = ?,
+            arrival_time = ?
+        WHERE sch_id = ?`,
+        [
+            bus_id,
+            r_id,
+            driver_id || null,
+            timeValidation.normalizedDepartureTime,
+            timeValidation.normalizedArrivalTime,
+            req.params.id
+        ]
     );
 
     if (result.affectedRows === 0) {
-        return res.status(404).json({ message: 'Schedule not found' });
+        return res.status(404).json({
+            message: 'Schedule not found'
+        });
     }
 
-    return res.status(200).json({ message: 'Schedule updated successfully' });
+    return res.status(200).json({
+        message: 'Schedule updated successfully'
+    });
 }));
 
 app.delete('/api/schedules/:id', requireManager, asyncHandler(async (req, res) => {
@@ -631,10 +861,20 @@ app.delete('/api/schedules/:id', requireManager, asyncHandler(async (req, res) =
 }));
 
 app.get('/api/schedules/:id/seats', requireCustomer, asyncHandler(async (req, res) => {
+    await cleanUnavailableSchedules();
+
     const schedule = await getScheduleDetails(req.params.id);
 
     if (!schedule) {
         return res.status(404).json({ message: 'Schedule not found' });
+    }
+
+    if (new Date(schedule.departure_time) <= new Date()) {
+        return res.status(400).json({ message: 'This schedule is no longer available' });
+    }
+
+    if (Number(schedule.available_seats) <= 0) {
+        return res.status(409).json({ message: 'This bus is already full' });
     }
 
     const [reservedSeats] = await db.query(
@@ -660,6 +900,8 @@ app.get('/api/schedules/:id/seats', requireCustomer, asyncHandler(async (req, re
 
 // Tickets
 app.post('/api/tickets', requireCustomer, asyncHandler(async (req, res) => {
+    await cleanUnavailableSchedules();
+
     const { customer_name, sch_id, seat_number } = req.body;
 
     if (!customer_name || !isPositiveInteger(sch_id) || !isPositiveInteger(seat_number)) {
@@ -676,6 +918,16 @@ app.post('/api/tickets', requireCustomer, asyncHandler(async (req, res) => {
         if (!schedule) {
             await connection.rollback();
             return res.status(404).json({ message: 'Schedule not found' });
+        }
+
+        if (new Date(schedule.departure_time) <= new Date()) {
+            await connection.rollback();
+            return res.status(400).json({ message: 'This schedule is no longer available' });
+        }
+
+        if (Number(schedule.available_seats) <= 0) {
+            await connection.rollback();
+            return res.status(409).json({ message: 'This bus is already full' });
         }
 
         if (Number(seat_number) > schedule.total_seat) {
@@ -731,6 +983,7 @@ app.get('/api/tickets', requireManager, asyncHandler(async (req, res) => {
                 ticket.seat_number,
                 schedules.sch_id,
                 schedules.departure_time,
+                schedules.arrival_time,
                 buses.plate_Number,
                 routes.source,
                 routes.destination,
@@ -757,6 +1010,7 @@ app.get('/api/tickets/:id', requireManager, asyncHandler(async (req, res) => {
                 ticket.seat_number,
                 schedules.sch_id,
                 schedules.departure_time,
+                schedules.arrival_time,
                 buses.plate_Number,
                 routes.source,
                 routes.destination,
@@ -876,6 +1130,55 @@ app.get('/api/reports/summary', requireManager, asyncHandler(async (req, res) =>
         ...revenue
     });
 }));
+app.get('/api/reports/details', requireManager, asyncHandler(async (req, res) => {
+
+    const { whereSql, params } = buildReportFilters(req.query);
+
+    const [reports] = await db.query(
+        `
+        SELECT
+            ticket.ticket_id,
+            ticket.customer_name,
+            ticket.seat_number,
+
+            schedules.sch_id,
+            schedules.departure_time,
+            schedules.arrival_time,
+
+            buses.bus_id,
+            buses.plate_Number,
+            buses.total_seat,
+
+            routes.r_id,
+            routes.source,
+            routes.destination,
+            routes.price,
+
+            users.full_name AS driver_name
+
+        FROM ticket
+
+        JOIN schedules
+            ON ticket.sch_id = schedules.sch_id
+
+        JOIN buses
+            ON schedules.bus_id = buses.bus_id
+
+        JOIN routes
+            ON schedules.r_id = routes.r_id
+
+        LEFT JOIN users
+            ON schedules.driver_id = users.user_id
+
+        ${whereSql}
+
+        ORDER BY schedules.departure_time DESC
+        `,
+        params
+    );
+
+    return res.status(200).json(reports);
+}));
 
 app.get('/api/driver/dashboard', requireDriver, asyncHandler(async (req, res) => {
     const [schedules] = await db.query(
@@ -883,6 +1186,7 @@ app.get('/api/driver/dashboard', requireDriver, asyncHandler(async (req, res) =>
             SELECT
                 schedules.sch_id,
                 schedules.departure_time,
+                schedules.arrival_time,
                 buses.bus_id,
                 buses.plate_Number,
                 buses.total_seat,
@@ -930,6 +1234,15 @@ async function startServer() {
         await db.query('SELECT 1');
         console.log('Connected to the database');
         await createDefaultManager();
+        await cleanUnavailableSchedules();
+
+        setInterval(async () => {
+            try {
+                await cleanUnavailableSchedules();
+            } catch (err) {
+                console.error('Schedule cleanup error:', err);
+            }
+        }, 60000);
 
         app.listen(port, () => {
             console.log(`Server is running on http://localhost:${port}`);

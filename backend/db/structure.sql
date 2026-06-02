@@ -27,6 +27,7 @@ CREATE TABLE schedules (
     r_id INT NOT NULL,
     driver_id INT,
     departure_time DATETIME NOT NULL,
+    arrival_time DATETIME,
     UNIQUE KEY unique_bus_departure (bus_id, departure_time),
     FOREIGN KEY (bus_id) REFERENCES buses(bus_id) ON DELETE CASCADE ON UPDATE CASCADE,
     FOREIGN KEY (r_id) REFERENCES routes(r_id) ON DELETE CASCADE ON UPDATE CASCADE,

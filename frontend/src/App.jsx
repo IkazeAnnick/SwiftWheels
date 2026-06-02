@@ -13,8 +13,8 @@ const emptyPassword = { old_password: '', new_password: '' }
 const emptyBus = { plate_Number: '', total_seat: '' }
 const emptyRoute = { source: '', destination: '', price: '' }
 const emptyDriver = { full_name: '', email: '', phone: '', password: '', role: 'driver' }
-const emptySchedule = { bus_id: '', r_id: '', driver_id: '', departure_time: '' }
-const emptySearch = { source: '', destination: '', departure_date: '', departure_time: '' }
+const emptySchedule = { bus_id: '', r_id: '', driver_id: '', departure_time: '', arrival_time: '' }
+const emptySearch = { source: '', destination: '', departure_date: '' }
 const emptyTicket = { customer_name: '', sch_id: '', seat_number: '' }
 const emptyReportFilters = { departure_date: '', r_id: '', sch_id: '' }
 
@@ -32,9 +32,10 @@ function App() {
   const [drivers, setDrivers] = useState([])
   const [schedules, setSchedules] = useState([])
   const [tickets, setTickets] = useState([])
-  const [reports, setReports] = useState(null)
   const [reportTickets, setReportTickets] = useState([])
   const [reportFilters, setReportFilters] = useState(emptyReportFilters)
+  const [appliedReportFilters, setAppliedReportFilters] = useState(emptyReportFilters)
+  const [reportViewed, setReportViewed] = useState(false)
   const [driverDashboard, setDriverDashboard] = useState(null)
 
   const [busForm, setBusForm] = useState(emptyBus)
@@ -44,6 +45,7 @@ function App() {
   const [editing, setEditing] = useState({ type: '', id: null })
 
   const [searchForm, setSearchForm] = useState(emptySearch)
+  const [customerScheduleOptions, setCustomerScheduleOptions] = useState([])
   const [searchResults, setSearchResults] = useState([])
   const [ticketForm, setTicketForm] = useState(emptyTicket)
   const [seatInfo, setSeatInfo] = useState(null)
@@ -70,6 +72,11 @@ function App() {
     if (user.role === 'driver') {
       loadDriverData()
     }
+
+    if (user.role === 'customer') {
+      loadCustomerScheduleOptions()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
   function updateForm(setter, field, value) {
@@ -82,7 +89,7 @@ function App() {
 
     try {
       await action()
-      if (successMessage) setMessage(successMessage)
+      if (successMessage) setMessage(typeof successMessage === 'function' ? successMessage() : successMessage)
     } catch (err) {
       setMessage(err.response?.data?.message || 'Something went wrong.')
     } finally {
@@ -96,13 +103,12 @@ function App() {
 
   async function loadManagerData(filters = reportFilters) {
     const reportParams = getReportParams(filters)
-    const [busRes, routeRes, driverRes, scheduleRes, ticketRes, reportRes, reportTicketRes] = await Promise.all([
+    const [busRes, routeRes, driverRes, scheduleRes, ticketRes, reportTicketRes] = await Promise.all([
       api.get('/buses'),
       api.get('/routes'),
       api.get('/drivers'),
       api.get('/schedules'),
       api.get('/tickets'),
-      api.get('/reports/summary', { params: reportParams }),
       api.get('/tickets', { params: reportParams }),
     ])
 
@@ -111,13 +117,18 @@ function App() {
     setDrivers(driverRes.data)
     setSchedules(scheduleRes.data)
     setTickets(ticketRes.data)
-    setReports(reportRes.data)
     setReportTickets(reportTicketRes.data)
+    setAppliedReportFilters(filters)
   }
 
   async function loadDriverData() {
     const response = await api.get('/driver/dashboard')
     setDriverDashboard(response.data)
+  }
+
+  async function loadCustomerScheduleOptions() {
+    const response = await api.get('/customer/schedule-options')
+    setCustomerScheduleOptions(response.data)
   }
 
   async function login(event) {
@@ -142,10 +153,16 @@ function App() {
     await run(async () => {
       await api.post('/auth/logout')
       setUser(null)
-      setReports(null)
       setReportTickets([])
       setReportFilters(emptyReportFilters)
+      setAppliedReportFilters(emptyReportFilters)
+      setReportViewed(false)
       setDriverDashboard(null)
+      setCustomerScheduleOptions([])
+      setSearchResults([])
+      setTicketForm(emptyTicket)
+      setSeatInfo(null)
+      setReservedTicket(null)
     }, 'Logged out successfully.')
   }
 
@@ -172,13 +189,14 @@ function App() {
       })
     }
     if (type === 'schedule') {
-      setScheduleForm({
-        bus_id: record.bus_id,
-        r_id: record.r_id,
-        driver_id: record.driver_id || '',
-        departure_time: toDatetimeLocal(record.departure_time),
-      })
-    }
+  setScheduleForm({
+    bus_id: record.bus_id,
+    r_id: record.r_id,
+    driver_id: record.driver_id || '',
+    departure_time: toDatetimeLocal(record.departure_time),
+    arrival_time: toDatetimeLocal(record.arrival_time),
+  })
+}
     if (type === 'ticket') {
       setTicketForm({
         customer_name: record.customer_name,
@@ -266,29 +284,128 @@ function App() {
 
   async function applyReportFilters(event) {
     event.preventDefault()
+    let reportCount = 0
+
     await run(async () => {
       const reportParams = getReportParams(reportFilters)
-      const [reportRes, ticketRes] = await Promise.all([
-        api.get('/reports/summary', { params: reportParams }),
-        api.get('/tickets', { params: reportParams }),
-      ])
+      const response = await api.get('/tickets', {
+        params: reportParams,
+      })
 
-      setReports(reportRes.data)
-      setReportTickets(ticketRes.data)
-    }, 'Report filters applied.')
+      reportCount = response.data.length
+      setReportTickets(response.data)
+      setAppliedReportFilters(reportFilters)
+      setReportViewed(true)
+    }, () => `Report loaded with ${reportCount} matching record${reportCount === 1 ? '' : 's'}.`)
   }
 
   async function clearReportFilters() {
     setReportFilters(emptyReportFilters)
-    await run(async () => {
-      const [reportRes, ticketRes] = await Promise.all([
-        api.get('/reports/summary'),
-        api.get('/tickets'),
-      ])
 
-      setReports(reportRes.data)
-      setReportTickets(ticketRes.data)
+    await run(async () => {
+      const response = await api.get('/tickets')
+
+      setReportTickets(response.data)
+      setAppliedReportFilters(emptyReportFilters)
+      setReportViewed(false)
     }, 'Report filters cleared.')
+  }
+
+  function printReport() {
+    if (reportTickets.length === 0) {
+      setMessage('No report records to print.')
+      return
+    }
+
+    const printedAt = formatDateTime(new Date())
+    const filterSummary = getReportFilterSummary(appliedReportFilters, routes, schedules)
+    const rows = reportTickets.map((ticket) => `
+      <tr>
+        <td>${escapeHtml(ticket.ticket_id)}</td>
+        <td>${escapeHtml(ticket.customer_name)}</td>
+        <td>${escapeHtml(ticket.source)} to ${escapeHtml(ticket.destination)}</td>
+        <td>${escapeHtml(ticket.plate_Number)}</td>
+        <td>${escapeHtml(ticket.seat_number)}</td>
+        <td>${escapeHtml(formatDateTime(ticket.departure_time))}</td>
+        <td>${escapeHtml(formatDateTime(ticket.arrival_time))}</td>
+        <td>${escapeHtml(ticket.price)} RWF</td>
+      </tr>
+    `).join('')
+    const totalRevenue = reportTickets.reduce((sum, ticket) => sum + Number(ticket.price || 0), 0)
+    const printWindow = window.open('', '_blank', 'width=900,height=700')
+
+    if (!printWindow) {
+      setMessage('Please allow popups to print the report.')
+      return
+    }
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <title>Swift Wheels Report</title>
+          <style>
+            * { box-sizing: border-box; }
+            body { font-family: Arial, sans-serif; color: #111827; margin: 0; background: #f9fafb; }
+            main { max-width: 1100px; margin: 0 auto; padding: 32px; background: #ffffff; min-height: 100vh; }
+            header { border-bottom: 2px solid #111827; padding-bottom: 16px; margin-bottom: 18px; }
+            h1 { margin: 0 0 6px; font-size: 28px; }
+            p { margin: 4px 0; color: #374151; }
+            .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+            button { border: 0; border-radius: 8px; background: #16a34a; color: white; padding: 10px 16px; font-weight: 700; cursor: pointer; }
+            .summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+            .summary-card { border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; background: #f3f4f6; }
+            .summary-card strong { display: block; font-size: 20px; color: #111827; }
+            table { border-collapse: collapse; width: 100%; margin-top: 20px; font-size: 13px; }
+            th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; vertical-align: top; }
+            th { background: #e5e7eb; color: #111827; }
+            @media print {
+              body { background: #ffffff; }
+              main { max-width: none; padding: 0; }
+              .toolbar { display: none; }
+            }
+          </style>
+        </head>
+        <body>
+          <main>
+            <div class="toolbar">
+              <button type="button" onclick="window.print()">Print Report</button>
+            </div>
+            <header>
+              <h1>Swift Wheels Report</h1>
+              <p>Generated: ${escapeHtml(printedAt)}</p>
+              <p>Applied filters: ${escapeHtml(filterSummary)}</p>
+            </header>
+            <section class="summary-grid" aria-label="Report summary">
+              <div class="summary-card"><span>Total Tickets</span><strong>${reportTickets.length}</strong></div>
+              <div class="summary-card"><span>Total Revenue</span><strong>${totalRevenue} RWF</strong></div>
+              <div class="summary-card"><span>Routes Included</span><strong>${new Set(reportTickets.map((ticket) => `${ticket.source}-${ticket.destination}`)).size}</strong></div>
+            </section>
+            <table>
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Customer</th>
+                  <th>Route</th>
+                  <th>Bus</th>
+                  <th>Seat</th>
+                  <th>Departure</th>
+                  <th>Arrival</th>
+                  <th>Price</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </main>
+          <script>
+            window.addEventListener('load', () => window.print())
+          </script>
+        </body>
+      </html>
+    `)
+    printWindow.document.close()
+    printWindow.focus()
+    printWindow.print()
   }
 
   async function searchSchedules(event) {
@@ -303,9 +420,17 @@ function App() {
   }
 
   async function chooseSchedule(schedule) {
-    setTicketForm((current) => ({ ...current, sch_id: schedule.sch_id, seat_number: '' }))
-    const response = await api.get(`/schedules/${schedule.sch_id}/seats`)
-    setSeatInfo(response.data)
+    try {
+      setTicketForm((current) => ({ ...current, sch_id: schedule.sch_id, seat_number: '' }))
+      const response = await api.get(`/schedules/${schedule.sch_id}/seats`)
+      setSeatInfo(response.data)
+      setMessage('')
+    } catch (err) {
+      setTicketForm(emptyTicket)
+      setSeatInfo(null)
+      setMessage(err.response?.data?.message || 'This schedule is not available.')
+      await loadCustomerScheduleOptions()
+    }
   }
 
   async function reserveTicket(event) {
@@ -313,6 +438,7 @@ function App() {
     await run(async () => {
       const response = await api.post('/tickets', ticketForm)
       setReservedTicket(response.data.ticket)
+      await loadCustomerScheduleOptions()
       await chooseSchedule({ sch_id: ticketForm.sch_id })
     }, 'Ticket reserved successfully.')
   }
@@ -358,9 +484,10 @@ function App() {
           drivers={drivers}
           schedules={schedules}
           tickets={tickets}
-          reports={reports}
           reportTickets={reportTickets}
           reportFilters={reportFilters}
+          appliedReportFilters={appliedReportFilters}
+          reportViewed={reportViewed}
           busForm={busForm}
           routeForm={routeForm}
           driverForm={driverForm}
@@ -379,6 +506,7 @@ function App() {
           deleteRecord={deleteRecord}
           applyReportFilters={applyReportFilters}
           clearReportFilters={clearReportFilters}
+          printReport={printReport}
           editing={editing}
           loading={loading}
           updateForm={updateForm}
@@ -400,6 +528,7 @@ function App() {
         <CustomerDashboard
           searchForm={searchForm}
           setSearchForm={setSearchForm}
+          scheduleOptions={customerScheduleOptions}
           searchSchedules={searchSchedules}
           searchResults={searchResults}
           chooseSchedule={chooseSchedule}
@@ -518,6 +647,11 @@ function FleetManagerDashboard(props) {
     ['schedules', 'Schedules'],
     ['tickets', 'Tickets'],
   ]
+  const reportTotalRevenue = props.reportTickets.reduce((sum, ticket) => sum + Number(ticket.price || 0), 0)
+  const reportRouteCount = new Set(
+    props.reportTickets.map((ticket) => `${ticket.source}-${ticket.destination}`),
+  ).size
+  const reportFilterSummary = getReportFilterSummary(props.appliedReportFilters, props.routes, props.schedules)
 
   return (
     <section className="manager-shell">
@@ -539,60 +673,172 @@ function FleetManagerDashboard(props) {
 
       <section className="dashboard-grid">
         {managerPage === 'reports' && (
-          <>
-            <section className="panel">
-              <h2>Reports</h2>
-              <form className="form-grid" onSubmit={props.applyReportFilters}>
-                <label>
-                  Date
-                  <input
-                    type="date"
-                    value={props.reportFilters.departure_date}
-                    onChange={(event) => props.updateForm(props.setReportFilters, 'departure_date', event.target.value)}
-                  />
-                </label>
-                <label>
-                  Route
-                  <select
-                    value={props.reportFilters.r_id}
-                    onChange={(event) => props.updateForm(props.setReportFilters, 'r_id', event.target.value)}
-                  >
-                    <option value="">All routes</option>
-                    {props.routes.map((route) => (
-                      <option key={route.r_id} value={route.r_id}>{route.source} to {route.destination}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Schedule
-                  <select
-                    value={props.reportFilters.sch_id}
-                    onChange={(event) => props.updateForm(props.setReportFilters, 'sch_id', event.target.value)}
-                  >
-                    <option value="">All schedules</option>
-                    {props.schedules.map((schedule) => (
-                      <option key={schedule.sch_id} value={schedule.sch_id}>{formatScheduleOption(schedule)}</option>
-                    ))}
-                  </select>
-                </label>
-                <button type="submit" disabled={props.loading}>Filter</button>
-                <button type="button" onClick={props.clearReportFilters} disabled={props.loading}>Clear</button>
-              </form>
+  <>
+    <section className="panel">
+      <h2>View Reports</h2>
 
-              {props.reports ? (
-                <dl className="report-grid">
-                  {Object.entries(props.reports).map(([key, value]) => (
-                    <div key={key}>
-                      <dt>{formatReportLabel(key)}</dt>
-                      <dd>{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-              ) : <p>No report data yet.</p>}
-            </section>
-            <DataPanel title="Ticket Report" rows={props.reportTickets.map(formatTicketRow)} />
-          </>
-        )}
+      <form className="form-grid" onSubmit={props.applyReportFilters}>
+        <label>
+          Date
+          <input
+            type="date"
+            value={props.reportFilters.departure_date}
+            onChange={(event) =>
+              props.updateForm(
+                props.setReportFilters,
+                'departure_date',
+                event.target.value
+              )
+            }
+          />
+        </label>
+
+        <label>
+          Route
+          <select
+            value={props.reportFilters.r_id}
+            onChange={(event) =>
+              props.updateForm(
+                props.setReportFilters,
+                'r_id',
+                event.target.value
+              )
+            }
+          >
+            <option value="">Select Route</option>
+
+            {props.routes.map((route) => (
+              <option key={route.r_id} value={route.r_id}>
+                {route.source} to {route.destination}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Schedule
+          <select
+            value={props.reportFilters.sch_id}
+            onChange={(event) =>
+              props.updateForm(
+                props.setReportFilters,
+                'sch_id',
+                event.target.value
+              )
+            }
+          >
+            <option value="">Select Schedule</option>
+
+            {props.schedules.map((schedule) => (
+              <option
+                key={schedule.sch_id}
+                value={schedule.sch_id}
+              >
+                {formatScheduleOption(schedule)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <button type="submit" disabled={props.loading}>
+          View Report
+        </button>
+
+        <button
+          type="button"
+          onClick={props.clearReportFilters}
+          disabled={props.loading}
+        >
+          Clear
+        </button>
+
+        <button
+          type="button"
+          onClick={props.printReport}
+          disabled={props.loading || props.reportTickets.length === 0}
+        >
+          Print Report
+        </button>
+      </form>
+    </section>
+    
+
+    <section className="panel report-panel">
+      <div className="report-heading">
+        <div>
+          <p className="eyebrow">Report Results</p>
+          <h2>{props.reportViewed ? 'Filtered Report' : 'Full Report Details'}</h2>
+          <p>Applied filters: {reportFilterSummary}</p>
+        </div>
+      </div>
+
+      {props.reportTickets.length === 0 ? (
+        <p>{props.reportViewed ? 'No matching records found for the selected filters.' : 'No report records found yet.'}</p>
+      ) : (
+        <>
+          <div className="report-grid">
+            <div>
+              <span>Total tickets</span>
+              <strong>{props.reportTickets.length}</strong>
+            </div>
+            <div>
+              <span>Total revenue</span>
+              <strong>{reportTotalRevenue} RWF</strong>
+            </div>
+            <div>
+              <span>Routes included</span>
+              <strong>{reportRouteCount}</strong>
+            </div>
+          </div>
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Customer</th>
+                  <th>Route</th>
+                  <th>Bus</th>
+                  <th>Seat</th>
+                  <th>Departure</th>
+                  <th>Arrival</th>
+                  <th>Price</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {props.reportTickets.map((ticket) => (
+                  <tr key={ticket.ticket_id}>
+                    <td>{ticket.ticket_id}</td>
+                    <td>{ticket.customer_name}</td>
+
+                    <td>
+                      {ticket.source} to {ticket.destination}
+                    </td>
+
+                    <td>{ticket.plate_Number}</td>
+
+                    <td>{ticket.seat_number}</td>
+
+                    <td>
+                      {formatDateTime(ticket.departure_time)}
+                    </td>
+
+                    <td>
+                      {formatDateTime(ticket.arrival_time)}
+                    </td>
+
+                    <td>{ticket.price} RWF</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  </>
+)}
 
         {managerPage === 'buses' && (
           <>
@@ -634,6 +880,7 @@ function FleetManagerDashboard(props) {
               <label>Route<select value={props.scheduleForm.r_id} onChange={(event) => props.updateForm(props.setScheduleForm, 'r_id', event.target.value)} required><option value="">Choose route</option>{props.routes.map((route) => <option key={route.r_id} value={route.r_id}>{route.source} to {route.destination}</option>)}</select></label>
               <label>Driver<select value={props.scheduleForm.driver_id} onChange={(event) => props.updateForm(props.setScheduleForm, 'driver_id', event.target.value)}><option value="">No driver yet</option>{props.drivers.map((driver) => <option key={driver.user_id} value={driver.user_id}>{driver.full_name}</option>)}</select></label>
               <label>Departure<input type="datetime-local" value={props.scheduleForm.departure_time} onChange={(event) => props.updateForm(props.setScheduleForm, 'departure_time', event.target.value)} required /></label>
+              <label>Arrival<input type="datetime-local"value={props.scheduleForm.arrival_time}onChange={(event) =>props.updateForm(props.setScheduleForm,'arrival_time',event.target.value)}required/></label>
             </ManagerForm>
             <DataPanel title="Schedules" rows={props.schedules.map(formatScheduleRow)} actions={(row, rawIndex) => rowActions('schedule', props.schedules[rawIndex].sch_id, props.schedules[rawIndex], props)} />
           </>
@@ -683,17 +930,56 @@ function DriverDashboard({ dashboard, passwordForm, setPasswordForm, changePassw
 }
 
 function CustomerDashboard(props) {
+  const sourceOptions = uniqueValues(props.scheduleOptions.map((schedule) => schedule.source))
+  const destinationOptions = uniqueValues(
+    props.scheduleOptions
+      .filter((schedule) => !props.searchForm.source || schedule.source === props.searchForm.source)
+      .map((schedule) => schedule.destination),
+  )
+
   return (
     <section className="dashboard-grid">
       <section className="panel">
         <h2>Find Trip</h2>
         <form className="form-grid" onSubmit={props.searchSchedules}>
-          <label>Source<input value={props.searchForm.source} onChange={(event) => props.updateForm(props.setSearchForm, 'source', event.target.value)} required /></label>
-          <label>Destination<input value={props.searchForm.destination} onChange={(event) => props.updateForm(props.setSearchForm, 'destination', event.target.value)} required /></label>
+          <label>
+            Source
+            <select
+              value={props.searchForm.source}
+              onChange={(event) => {
+                props.setSearchForm((current) => ({
+                  ...current,
+                  source: event.target.value,
+                  destination: '',
+                }))
+              }}
+              required
+            >
+              <option value="">Choose source</option>
+              {sourceOptions.map((source) => (
+                <option key={source} value={source}>{source}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Destination
+            <select
+              value={props.searchForm.destination}
+              onChange={(event) => props.updateForm(props.setSearchForm, 'destination', event.target.value)}
+              required
+              disabled={!props.searchForm.source}
+            >
+              <option value="">Choose destination</option>
+              {destinationOptions.map((destination) => (
+                <option key={destination} value={destination}>{destination}</option>
+              ))}
+            </select>
+          </label>
           <label>Departure Date<input type="date" value={props.searchForm.departure_date} onChange={(event) => props.updateForm(props.setSearchForm, 'departure_date', event.target.value)} required /></label>
           {/* <label>Departure Time<input type="time" value={props.searchForm.departure_time} onChange={(event) => props.updateForm(props.setSearchForm, 'departure_time', event.target.value)} required /></label> */}
           <button type="submit" disabled={props.loading}>Search</button>
         </form>
+        {props.scheduleOptions.length === 0 && <p>No available schedules are open for booking.</p>}
       </section>
 
       <section className="panel">
@@ -706,7 +992,13 @@ function CustomerDashboard(props) {
             <p>Driver: {schedule.driver_name || 'Not assigned'}</p>
             <p>Price: {schedule.price} RWF</p>
             <p>Available seats: {schedule.available_seats}</p>
-            <button type="button" onClick={() => props.chooseSchedule(schedule)}>Select</button>
+            <button
+              type="button"
+              onClick={() => props.chooseSchedule(schedule)}
+              disabled={Number(schedule.available_seats) <= 0}
+            >
+              Select
+            </button>
           </article>
         ))}
       </section>
@@ -794,10 +1086,37 @@ function toDatetimeLocal(value) {
   return offsetDate.toISOString().slice(0, 16)
 }
 
-function formatReportLabel(key) {
-  return key
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+function uniqueValues(values) {
+  return [...new Set(values.filter(Boolean))]
+}
+
+function getReportFilterSummary(filters, routes, schedules) {
+  const parts = []
+
+  if (filters.departure_date) {
+    parts.push(`Date: ${filters.departure_date}`)
+  }
+
+  if (filters.r_id) {
+    const route = routes.find((item) => String(item.r_id) === String(filters.r_id))
+    parts.push(route ? `Route: ${route.source} to ${route.destination}` : `Route ID: ${filters.r_id}`)
+  }
+
+  if (filters.sch_id) {
+    const schedule = schedules.find((item) => String(item.sch_id) === String(filters.sch_id))
+    parts.push(schedule ? `Schedule: ${formatScheduleOption(schedule)}` : `Schedule ID: ${filters.sch_id}`)
+  }
+
+  return parts.length ? parts.join(', ') : 'All records'
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
 function formatScheduleOption(schedule) {
@@ -834,6 +1153,7 @@ function formatScheduleRow(schedule) {
     bus: schedule.plate_Number,
     driver: schedule.driver_name || 'Not assigned',
     departure: formatDateTime(schedule.departure_time),
+    arrival: formatDateTime(schedule.arrival_time),
     price: schedule.price,
     available_seats: schedule.available_seats,
   }

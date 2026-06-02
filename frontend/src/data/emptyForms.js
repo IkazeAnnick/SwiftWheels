@@ -1,0 +1,10 @@
+export const emptyLogin = { email: '', password: '' }
+export const emptySignup = { full_name: '', email: '', phone: '', password: '' }
+export const emptyPassword = { old_password: '', new_password: '' }
+export const emptyBus = { plate_Number: '', total_seat: '' }
+export const emptyRoute = { source: '', destination: '', price: '' }
+export const emptyDriver = { full_name: '', email: '', phone: '', password: '', role: 'driver' }
+export const emptySchedule = { bus_id: '', r_id: '', driver_id: '', departure_time: '', arrival_time: '' }
+export const emptySearch = { source: '', destination: '', departure_date: '' }
+export const emptyTicket = { customer_name: '', sch_id: '', seat_number: '' }
+export const emptyReportFilters = { departure_date: '', r_id: '', sch_id: '' }
